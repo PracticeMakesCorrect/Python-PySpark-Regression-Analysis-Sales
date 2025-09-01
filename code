@@ -1,0 +1,54 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, log1p
+from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler
+from pyspark.ml.regression import LinearRegression, GBTRegressor
+from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.ml import Pipeline
+
+# init spark
+spark = SparkSession.builder.appName("asv_regression").getOrCreate()
+
+# load the dataset
+df = spark.read.csv("Book1.csv", header=True, inferSchema=True)
+
+# quick filter, drop zero/asv<=0
+df = df.filter(col("ASV") > 0)
+
+# log scale target (helps with skew)
+df = df.withColumn("log_ASV", log1p(col("ASV")))
+
+# encode industry
+ind_idx = StringIndexer(inputCol="Sub Industry", outputCol="ind_idx", handleInvalid="keep")
+ind_enc = OneHotEncoder(inputCols=["ind_idx"], outputCols=["ind_vec"])
+
+# features
+assembler = VectorAssembler(
+    inputCols=["ind_vec", "Sub Annual Revenue", "Sub Emp Count"],
+    outputCol="features"
+)
+
+### linear regression ###
+lr = LinearRegression(featuresCol="features", labelCol="log_ASV")
+lr_pipe = Pipeline(stages=[ind_idx, ind_enc, assembler, lr])
+lr_model = lr_pipe.fit(df)
+
+preds_lr = lr_model.transform(df)
+evalr = RegressionEvaluator(labelCol="log_ASV", predictionCol="prediction", metricName="r2")
+print("LR r2:", evalr.evaluate(preds_lr))
+
+lr_stage = lr_model.stages[-1]
+print("Intercept:", lr_stage.intercept)
+print("Coeffs:", lr_stage.coefficients)
+
+### gradient boosted trees ###
+gbt = GBTRegressor(featuresCol="features", labelCol="log_ASV", maxIter=50)
+gbt_pipe = Pipeline(stages=[ind_idx, ind_enc, assembler, gbt])
+gbt_model = gbt_pipe.fit(df)
+
+preds_gbt = gbt_model.transform(df)
+print("GBT r2:", evalr.evaluate(preds_gbt))
+
+gbt_stage = gbt_model.stages[-1]
+print("Feature importances:", gbt_stage.featureImportances)
+
+spark.stop()
